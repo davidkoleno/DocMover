@@ -59,7 +59,8 @@ def index_files(source_root, conn):
 
     cursor = conn.cursor()
 
-    processed = 0
+    processed_files = 0
+    processed_folders = 0
     inserted = 0
     errors = 0
 
@@ -69,67 +70,100 @@ def index_files(source_root, conn):
     print(f"Database: {DB_PATH}")
     print()
 
-    for root, dirs, files in os.walk(source_root):
-        root_path = Path(root)
+    # Get top-level folders first
+    print("Finding folders...")
 
-        for filename in files:
-            processed += 1
+    folders = []
 
+    with os.scandir(source_root) as entries:
+        for entry in entries:
             try:
-                full_path = root_path / filename
-                relative_path = full_path.relative_to(source_root)
+                if entry.is_dir():
+                    folders.append(entry.path)
+            except OSError as e:
+                print(f"Unable to inspect: {entry.path}")
+                print(e)
 
-                stat = full_path.stat()
+    total_folders = len(folders)
 
-                parts = relative_path.parts
-                top_level_folder = parts[0] if len(parts) > 1 else ""
+    print(f"Found {total_folders:,} folders.")
+    print()
+    print("Beginning file indexing...")
+    print()
 
-                cursor.execute("""
-                    INSERT OR IGNORE INTO files (
-                        relative_path,
-                        full_path,
-                        folder_path,
-                        top_level_folder,
-                        filename,
-                        extension,
-                        size_bytes,
-                        modified_time
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    str(relative_path),
-                    str(full_path),
-                    str(root_path),
-                    top_level_folder,
-                    filename,
-                    full_path.suffix,
-                    stat.st_size,
-                    stat.st_mtime
-                ))
+    for folder_path in folders:
 
-                if cursor.rowcount > 0:
-                    inserted += 1
+        processed_folders += 1
 
-            except Exception as e:
-                errors += 1
-                print(f"\nERROR: {full_path}")
-                print(f"       {e}")
+        try:
+            with os.scandir(folder_path) as entries:
 
-            if processed % COMMIT_EVERY == 0:
-                conn.commit()
+                for entry in entries:
 
-            if processed % PRINT_EVERY == 0:
-                elapsed = time.time() - start_time
-                rate = processed / elapsed if elapsed else 0
+                    try:
+                        if not entry.is_file():
+                            continue
 
-                print(
-                    f"\rProcessed: {processed:,} | "
-                    f"Inserted: {inserted:,} | "
-                    f"Errors: {errors:,} | "
-                    f"{rate:,.0f} files/sec",
-                    end="",
-                    flush=True
-                )
+                        processed_files += 1
+
+                        full_path = Path(entry.path)
+                        relative_path = full_path.relative_to(source_root)
+
+                        # scandir gives us cached stat information on many systems
+                        stat = entry.stat()
+
+                        cursor.execute("""
+                            INSERT OR IGNORE INTO files (
+                                relative_path,
+                                full_path,
+                                folder_path,
+                                top_level_folder,
+                                filename,
+                                extension,
+                                size_bytes,
+                                modified_time
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            str(relative_path),
+                            str(full_path),
+                            str(folder_path),
+                            Path(folder_path).name,
+                            entry.name,
+                            full_path.suffix,
+                            stat.st_size,
+                            stat.st_mtime
+                        ))
+
+                        if cursor.rowcount > 0:
+                            inserted += 1
+
+                    except Exception as e:
+                        errors += 1
+                        print(f"\nFILE ERROR: {entry.path}")
+                        print(f"            {e}")
+
+        except Exception as e:
+            errors += 1
+            print(f"\nFOLDER ERROR: {folder_path}")
+            print(f"              {e}")
+
+        # Commit after each folder
+        conn.commit()
+
+        elapsed = time.time() - start_time
+        rate = processed_files / elapsed if elapsed else 0
+
+        print(
+            f"\rFolder: {processed_folders:,}/{total_folders:,} "
+            f"({processed_folders / total_folders * 100:.2f}%) | "
+            f"Files: {processed_files:,} | "
+            f"Inserted: {inserted:,} | "
+            f"Errors: {errors:,} | "
+            f"{rate:,.0f} files/sec",
+            end="",
+            flush=True
+        )
 
     conn.commit()
 
@@ -137,7 +171,8 @@ def index_files(source_root, conn):
 
     print("\n")
     print("Index complete.")
-    print(f"Processed: {processed:,}")
+    print(f"Folders:   {processed_folders:,}")
+    print(f"Files:     {processed_files:,}")
     print(f"Inserted:  {inserted:,}")
     print(f"Errors:    {errors:,}")
     print(f"Elapsed:   {elapsed / 60:,.1f} minutes")
