@@ -65,82 +65,134 @@ def prepare_database(conn):
 # =========================
 
 def scan_destination(destination_root, conn):
+    destination_root = Path(destination_root)
 
     print(f"Scanning destination:")
     print(destination_root)
     print()
 
-    # Clear results from previous scan
     conn.execute("DELETE FROM destination_scan")
     conn.commit()
 
     cursor = conn.cursor()
 
-    processed = 0
+    processed_files = 0
+    processed_folders = 0
     errors = 0
 
     start_time = time.time()
 
+    # =========================
+    # FIND TOP-LEVEL FOLDERS
+    # =========================
+
+    print("Finding destination folders...")
+
+    folders = []
+
+    with os.scandir(destination_root) as entries:
+        for entry in entries:
+            try:
+                if entry.is_dir():
+                    folders.append(entry.path)
+
+            except OSError as e:
+                errors += 1
+                print(f"\nUnable to inspect: {entry.path}")
+                print(f"                   {e}")
+
+    total_folders = len(folders)
+
+    print(f"Found {total_folders:,} folders.")
+    print()
+    print("Beginning destination scan...")
+    print()
+
     batch = []
 
-    for root, dirs, files in os.walk(destination_root):
+    # =========================
+    # SCAN EACH FOLDER
+    # =========================
 
-        root_path = Path(root)
+    for folder_path in folders:
 
-        for filename in files:
+        processed_folders += 1
 
-            processed += 1
+        try:
 
-            full_path = root_path / filename
+            with os.scandir(folder_path) as entries:
 
-            try:
+                for entry in entries:
 
-                relative_path = full_path.relative_to(destination_root)
+                    try:
 
-                stat = full_path.stat()
+                        if not entry.is_file():
+                            continue
 
-                batch.append((
-                    str(relative_path),
-                    stat.st_size
-                ))
+                        processed_files += 1
 
-            except Exception as e:
+                        full_path = Path(entry.path)
+                        relative_path = full_path.relative_to(destination_root)
 
-                errors += 1
+                        stat = entry.stat()
 
-                print()
-                print(f"ERROR: {full_path}")
-                print(f"       {e}")
+                        batch.append((
+                            str(relative_path),
+                            stat.st_size
+                        ))
 
-            if len(batch) >= COMMIT_EVERY:
+                    except Exception as e:
 
-                cursor.executemany("""
-                    INSERT OR REPLACE INTO destination_scan (
-                        relative_path,
-                        size_bytes
-                    )
-                    VALUES (?, ?)
-                """, batch)
+                        errors += 1
 
-                conn.commit()
+                        print(f"\nFILE ERROR: {entry.path}")
+                        print(f"            {e}")
 
-                batch.clear()
+        except Exception as e:
 
-            if processed % PRINT_EVERY == 0:
+            errors += 1
 
-                elapsed = time.time() - start_time
+            print(f"\nFOLDER ERROR: {folder_path}")
+            print(f"              {e}")
 
-                rate = processed / elapsed if elapsed else 0
+        # Write database batch when large enough
+        if len(batch) >= COMMIT_EVERY:
 
-                print(
-                    f"\rScanned: {processed:,} | "
-                    f"Errors: {errors:,} | "
-                    f"{rate:,.0f} files/sec",
-                    end="",
-                    flush=True
+            cursor.executemany("""
+                INSERT OR REPLACE INTO destination_scan (
+                    relative_path,
+                    size_bytes
                 )
+                VALUES (?, ?)
+            """, batch)
 
-    # Write final incomplete batch
+            conn.commit()
+
+            batch.clear()
+
+        # Progress display
+        elapsed = time.time() - start_time
+        rate = processed_files / elapsed if elapsed else 0
+
+        percent = (
+            processed_folders / total_folders * 100
+            if total_folders else 0
+        )
+
+        print(
+            f"\rFolder: {processed_folders:,}/{total_folders:,} "
+            f"({percent:.2f}%) | "
+            f"Files: {processed_files:,} | "
+            f"Errors: {errors:,} | "
+            f"{rate:,.0f} files/sec",
+            end="",
+            flush=True
+        )
+
+    # =========================
+    # FINAL DATABASE WRITE
+    # =========================
+
     if batch:
 
         cursor.executemany("""
@@ -155,12 +207,12 @@ def scan_destination(destination_root, conn):
 
     elapsed = time.time() - start_time
 
-    print()
-    print()
+    print("\n")
     print("Destination scan complete.")
-    print(f"Files scanned: {processed:,}")
-    print(f"Errors:        {errors:,}")
-    print(f"Elapsed:       {elapsed / 60:,.1f} minutes")
+    print(f"Folders scanned: {processed_folders:,}")
+    print(f"Files scanned:   {processed_files:,}")
+    print(f"Errors:          {errors:,}")
+    print(f"Elapsed:         {elapsed / 60:,.1f} minutes")
 
 
 # =========================
