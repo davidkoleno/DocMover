@@ -260,29 +260,23 @@ def run_copy():
     conn = sqlite3.connect(DB_PATH)
 
     try:
-
         prepare_database(conn)
-
         folders = get_folders(conn)
 
     finally:
-
         conn.close()
 
     total = len(folders)
 
     if total == 0:
-
         print("No folders need to be copied.")
         return
 
     print(f"Folders queued:     {total:,}")
     print(f"Folder workers:     {MAX_WORKERS}")
     print(f"Threads per folder: {ROBOCOPY_THREADS}")
-    print(
-        f"Potential copy threads: "
-        f"{MAX_WORKERS * ROBOCOPY_THREADS}"
-    )
+    print()
+    print("Press Ctrl+C to stop after the current batch.")
     print()
 
     completed = 0
@@ -290,82 +284,92 @@ def run_copy():
 
     start_time = time.time()
 
-    with ThreadPoolExecutor(
-        max_workers=MAX_WORKERS
-    ) as executor:
+    try:
 
-        futures = {
-            executor.submit(
-                copy_folder,
-                folder
-            ): folder
-            for folder in folders
-        }
+        # Process only MAX_WORKERS folders at a time
+        for batch_start in range(0, total, MAX_WORKERS):
 
-        for future in as_completed(futures):
+            batch = folders[
+                batch_start:
+                batch_start + MAX_WORKERS
+            ]
 
-            result = future.result()
+            with ThreadPoolExecutor(
+                max_workers=MAX_WORKERS
+            ) as executor:
 
-            folder = result["folder"]
-            exit_code = result["exit_code"]
+                futures = {
+                    executor.submit(
+                        copy_folder,
+                        folder
+                    ): folder
+                    for folder in batch
+                }
 
-            # Robocopy exit codes 0-7 are considered
-            # successful / non-fatal.
-            if 0 <= exit_code < 8:
+                for future in as_completed(futures):
 
-                mark_complete(
-                    folder,
-                    exit_code
-                )
+                    result = future.result()
 
-                completed += 1
+                    folder = result["folder"]
+                    exit_code = result["exit_code"]
 
-                status = "OK"
+                    if 0 <= exit_code < 8:
 
-            else:
+                        mark_complete(
+                            folder,
+                            exit_code
+                        )
 
-                mark_failed(
-                    folder,
-                    exit_code,
-                    result["error"]
-                )
+                        completed += 1
+                        status = "OK"
 
-                failed += 1
+                    else:
 
-                status = "FAILED"
+                        mark_failed(
+                            folder,
+                            exit_code,
+                            result["error"]
+                        )
 
-            finished = completed + failed
+                        failed += 1
+                        status = "FAILED"
 
-            elapsed = time.time() - start_time
+                    finished = completed + failed
 
-            folders_per_minute = (
-                finished / elapsed * 60
-                if elapsed else 0
-            )
+                    elapsed = time.time() - start_time
 
-            with print_lock:
+                    folders_per_minute = (
+                        finished / elapsed * 60
+                        if elapsed else 0
+                    )
 
-                print(
-                    f"[{finished:,}/{total:,}] "
-                    f"{status} | "
-                    f"Code {exit_code} | "
-                    f"{result['elapsed']:.1f}s | "
-                    f"{folders_per_minute:.1f} folders/min | "
-                    f"{folder}"
-                )
+                    print(
+                        f"[{finished:,}/{total:,}] "
+                        f"{status} | "
+                        f"Code {exit_code} | "
+                        f"{result['elapsed']:.1f}s | "
+                        f"{folders_per_minute:.1f} folders/min | "
+                        f"{folder}"
+                    )
+
+    except KeyboardInterrupt:
+
+        print()
+        print()
+        print("Stop requested.")
+        print("No new folders will be started.")
+        print("Restart the script later to resume.")
+        print()
 
     elapsed = time.time() - start_time
 
-    print()
     print("=" * 60)
-    print("COPY SESSION COMPLETE")
+    print("COPY SESSION ENDED")
     print("=" * 60)
-    print(f"Folders attempted: {total:,}")
-    print(f"Successful:        {completed:,}")
-    print(f"Failed:            {failed:,}")
-    print(f"Elapsed:           {elapsed / 60:,.1f} minutes")
+    print(f"Successful this run: {completed:,}")
+    print(f"Failed this run:     {failed:,}")
+    print(f"Elapsed:             {elapsed / 60:,.1f} minutes")
     print("=" * 60)
-
 
 # =========================
 # MAIN
